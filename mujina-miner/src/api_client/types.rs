@@ -27,6 +27,8 @@ pub struct BoardState {
     pub name: String,
     pub model: String,
     pub serial: Option<String>,
+    /// Configured board operating frequency in MHz, if known.
+    pub frequency_mhz: Option<f32>,
     pub fans: Vec<Fan>,
     pub temperatures: Vec<TemperatureSensor>,
     pub powers: Vec<PowerMeasurement>,

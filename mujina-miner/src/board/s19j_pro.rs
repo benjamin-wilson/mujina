@@ -17,7 +17,7 @@ use super::{
     pattern::{BoardPattern, Match, StringMatch},
 };
 use crate::{
-    api_client::types::{BoardState, Fan, MinerState, TemperatureSensor},
+    api_client::types::{BoardState, Fan, MinerState, PowerMeasurement, TemperatureSensor},
     asic::{
         bm13xx::{
             self,
@@ -45,6 +45,9 @@ use crate::{
         serial::{SerialControl, SerialStream},
     },
 };
+
+const S19J_PRO_TARGET_FREQ_MHZ: f32 = 500.0;
+const APW12_POWER_RAIL_NAME: &str = "APW12";
 
 // Register this board type with the inventory system
 inventory::submit! {
@@ -276,12 +279,22 @@ impl Board for S19jPro {
         let (temp0, temp1) = self.temp_sensors.take().ok_or_else(|| {
             BoardError::InitializationFailed("Temperature sensors not initialized".to_string())
         })?;
+        let psu = self.psu.as_ref().map(Arc::clone);
         let fans = fan::all_fans(self.control_channel.clone());
         let display = BitcraneDisplay::new(self.control_channel.clone());
         let state_tx = self.state_tx.clone();
         let miner_state_rx = self.miner_state_rx.clone();
         tokio::spawn(async move {
-            telemetry_task(temp0, temp1, fans, display, state_tx, miner_state_rx).await;
+            telemetry_task(
+                temp0,
+                temp1,
+                psu,
+                fans,
+                display,
+                state_tx,
+                miner_state_rx,
+            )
+            .await;
         });
 
         Ok(vec![Box::new(thread)])
@@ -299,6 +312,7 @@ impl Board for S19jPro {
 async fn telemetry_task(
     temp0: Tmp75,
     temp1: Tmp75,
+    psu: Option<Arc<Mutex<Apw12Psu>>>,
     fans: [BitcraneFan; 4],
     display: BitcraneDisplay,
     state_tx: watch::Sender<BoardState>,
@@ -344,10 +358,29 @@ async fn telemetry_task(
             });
         }
 
+        let voltage_v = if let Some(psu) = &psu {
+            let mut psu = psu.lock().await;
+            psu.measure_voltage()
+                .await
+                .inspect_err(|e| debug!(rail = APW12_POWER_RAIL_NAME, error = %e, "Voltage read failed"))
+                .ok()
+        } else {
+            None
+        };
+
+        let powers = vec![PowerMeasurement {
+            name: APW12_POWER_RAIL_NAME.to_string(),
+            voltage_v,
+            current_a: None,
+            power_w: None,
+        }];
+
         // Update board state
         state_tx.send_modify(|state| {
+            state.frequency_mhz = Some(S19J_PRO_TARGET_FREQ_MHZ);
             state.temperatures = temperatures;
             state.fans = fan_states;
+            state.powers = powers;
         });
 
         // Update OLED display periodically with actual hashrate from scheduler
@@ -438,6 +471,7 @@ async fn create_from_usb(
         name: format!("s19jpro-{}", serial.as_deref().unwrap_or("unknown")),
         model: "S19j Pro".into(),
         serial,
+        frequency_mhz: None,
         ..Default::default()
     };
     let (state_tx, state_rx) = watch::channel(initial_state);

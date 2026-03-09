@@ -786,6 +786,7 @@ impl BitaxeBoard {
                     name: board_name.clone(),
                     model: board_model.clone(),
                     serial: board_serial.clone(),
+                    frequency_mhz: None,
                     fans: vec![Fan {
                         name: "fan".into(),
                         rpm: fan_rpm,
