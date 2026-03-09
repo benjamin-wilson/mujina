@@ -53,8 +53,10 @@ inventory::submit! {
             vid: Match::Any,
             pid: Match::Any,
             bcd_device: Match::Any,
-            manufacturer: Match::Specific(StringMatch::Exact("256F")),
-            product: Match::Specific(StringMatch::Exact("bitcrane_S19jpro")),
+            // Accept both the original board IDs and the current RP2040
+            // usbserial firmware IDs used by the flashed Bitcrane v3 bridge.
+            manufacturer: Match::Specific(StringMatch::Regex("^(256F|OSMU)$")),
+            product: Match::Specific(StringMatch::Regex("^(bitcrane_S19jpro|bitcrane3)$")),
             serial_pattern: Match::Any,
         },
         name: "S19j Pro",
