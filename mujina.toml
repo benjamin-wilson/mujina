@@ -58,8 +58,8 @@ model = "s19j_pro"
 serial_path = "/dev/ttyS3"
 reset_gpio = 454
 detect_gpio = 439
-temp_i2c_device = "/dev/i2c-0"
-eeprom_i2c_device = "/dev/i2c-0"
+temp_i2c_device = "/dev/i2c-1"
+eeprom_i2c_device = "/dev/i2c-1"
 required = false
 
 [[hardware.amlogic_control_board.hashboards]]
@@ -68,8 +68,8 @@ model = "s19j_pro"
 serial_path = "/dev/ttyS2"
 reset_gpio = 455
 detect_gpio = 440
-temp_i2c_device = "/dev/i2c-0"
-eeprom_i2c_device = "/dev/i2c-0"
+temp_i2c_device = "/dev/i2c-1"
+eeprom_i2c_device = "/dev/i2c-1"
 required = false
 
 [[hardware.amlogic_control_board.hashboards]]
@@ -78,6 +78,6 @@ model = "s19j_pro"
 serial_path = "/dev/ttyS1"
 reset_gpio = 456
 detect_gpio = 441
-temp_i2c_device = "/dev/i2c-0"
-eeprom_i2c_device = "/dev/i2c-0"
+temp_i2c_device = "/dev/i2c-1"
+eeprom_i2c_device = "/dev/i2c-1"
 required = false

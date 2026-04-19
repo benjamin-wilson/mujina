@@ -79,6 +79,7 @@ pub struct S19jProAmlogic {
     selected_hashboard: AmlogicHashboardConfig,
     board_serial: Option<String>,
     psu: Arc<Mutex<NativeAmlogicPsu>>,
+    psu_online: bool,
     state_tx: watch::Sender<BoardState>,
     thread_states: Arc<std::sync::Mutex<Vec<crate::api_client::types::ThreadState>>>,
     telemetry_shutdown: CancellationToken,
@@ -90,6 +91,7 @@ impl S19jProAmlogic {
         selected_hashboard: AmlogicHashboardConfig,
         board_serial: Option<String>,
         psu: Arc<Mutex<NativeAmlogicPsu>>,
+        psu_online: bool,
         state_tx: watch::Sender<BoardState>,
     ) -> Self {
         Self {
@@ -97,6 +99,7 @@ impl S19jProAmlogic {
             selected_hashboard,
             board_serial,
             psu,
+            psu_online,
             state_tx,
             thread_states: Arc::new(std::sync::Mutex::new(Vec::new())),
             telemetry_shutdown: CancellationToken::new(),
@@ -111,6 +114,7 @@ impl S19jProAmlogic {
             AmlogicHashboardConfig,
             Option<String>,
             Arc<Mutex<NativeAmlogicPsu>>,
+            bool,
         ),
         BoardError,
     > {
@@ -131,23 +135,32 @@ impl S19jProAmlogic {
         assert_all_resets(config)?;
 
         let psu = Arc::new(Mutex::new(NativeAmlogicPsu::new(config)));
-        let measured_voltage = {
+        let (measured_voltage, psu_online) = {
             let mut psu_guard = psu.lock().await;
             psu_guard
                 .set_enabled(true)
                 .map_err(|e| BoardError::HardwareControl(format!("Failed to enable PSU: {e}")))?;
-            psu_guard.config_watchdog(0x00).map_err(|e| {
-                BoardError::HardwareControl(format!("Failed to disable PSU watchdog: {e}"))
-            })?;
-            psu_guard
-                .set_voltage(config.startup.initial_voltage)
-                .await
-                .map_err(|e| {
-                    BoardError::HardwareControl(format!("Failed to set PSU voltage: {e}"))
-                })?;
 
             tokio::time::sleep(Duration::from_millis(config.startup.psu_settle_ms)).await;
-            psu_guard.measure_voltage().ok()
+            match psu_guard.config_watchdog(0x00) {
+                Ok(()) => {
+                    psu_guard
+                        .set_voltage(config.startup.initial_voltage)
+                        .await
+                        .map_err(|e| {
+                            BoardError::HardwareControl(format!("Failed to set PSU voltage: {e}"))
+                        })?;
+                    (psu_guard.measure_voltage().ok(), true)
+                }
+                Err(error) => {
+                    warn!(
+                        board = %board_name,
+                        error = %error,
+                        "APW12 control path unavailable; continuing with GPIO-only PSU enable"
+                    );
+                    (None, false)
+                }
+            }
         };
 
         let fan_states = build_fan_state(config, config.startup.default_fan_percent);
@@ -167,7 +180,7 @@ impl S19jProAmlogic {
             state.powers = power_states.clone();
         });
 
-        Ok((selected_hashboard, board_serial, psu))
+        Ok((selected_hashboard, board_serial, psu, psu_online))
     }
 }
 
@@ -224,9 +237,9 @@ impl Board for S19jProAmlogic {
                     gpio: SysfsGpio::new(self.selected_hashboard.reset_gpio),
                     reset_release_ms: self.config.startup.reset_release_ms,
                 })),
-                voltage_regulator: Some(
-                    Arc::clone(&self.psu) as Arc<Mutex<dyn VoltageRegulator + Send>>
-                ),
+                voltage_regulator: self
+                    .psu_online
+                    .then(|| Arc::clone(&self.psu) as Arc<Mutex<dyn VoltageRegulator + Send>>),
             },
         };
 
@@ -269,7 +282,7 @@ impl Board for S19jProAmlogic {
 
         let config = self.config.clone();
         let hashboard = self.selected_hashboard.clone();
-        let psu = Arc::clone(&self.psu);
+        let psu = self.psu_online.then(|| Arc::clone(&self.psu));
         let state_tx = self.state_tx.clone();
         let thread_states = Arc::clone(&self.thread_states);
         let shutdown = self.telemetry_shutdown.child_token();
@@ -688,7 +701,7 @@ fn build_fan_state(config: &AmlogicControlBoardConfig, percent: u8) -> Vec<Fan> 
 async fn native_telemetry_task(
     config: AmlogicControlBoardConfig,
     hashboard: AmlogicHashboardConfig,
-    psu: Arc<Mutex<NativeAmlogicPsu>>,
+    psu: Option<Arc<Mutex<NativeAmlogicPsu>>>,
     state_tx: watch::Sender<BoardState>,
     thread_states: Arc<std::sync::Mutex<Vec<crate::api_client::types::ThreadState>>>,
     shutdown: CancellationToken,
@@ -709,12 +722,16 @@ async fn native_telemetry_task(
         };
 
         let fans = read_fan_states(&config, config.startup.default_fan_percent).await;
-        let voltage_v = match psu.lock().await.measure_voltage() {
-            Ok(voltage_v) => Some(voltage_v),
-            Err(error) => {
-                debug!(error = %error, "Native telemetry PSU voltage read failed");
-                None
+        let voltage_v = if let Some(psu) = &psu {
+            match psu.lock().await.measure_voltage() {
+                Ok(voltage_v) => Some(voltage_v),
+                Err(error) => {
+                    debug!(error = %error, "Native telemetry PSU voltage read failed");
+                    None
+                }
             }
+        } else {
+            None
         };
         let powers = vec![PowerMeasurement {
             name: "apw12".into(),
@@ -941,11 +958,21 @@ async fn create_amlogic_board()
     };
     let (state_tx, state_rx) = watch::channel(initial_state);
 
-    let (selected_hashboard, board_serial, psu) = S19jProAmlogic::initialize(&config, &state_tx)
-        .await
-        .map_err(|e| Error::Hardware(format!("Failed to initialize native Amlogic board: {e}")))?;
+    let (selected_hashboard, board_serial, psu, psu_online) =
+        S19jProAmlogic::initialize(&config, &state_tx)
+            .await
+            .map_err(|e| {
+                Error::Hardware(format!("Failed to initialize native Amlogic board: {e}"))
+            })?;
 
-    let board = S19jProAmlogic::new(config, selected_hashboard, board_serial, psu, state_tx);
+    let board = S19jProAmlogic::new(
+        config,
+        selected_hashboard,
+        board_serial,
+        psu,
+        psu_online,
+        state_tx,
+    );
     let registration = super::BoardRegistration { state_rx };
     Ok((Box::new(board), registration))
 }
